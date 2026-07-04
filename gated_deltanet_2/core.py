@@ -38,6 +38,17 @@ from jax import lax
 # math runs in fp32 (paper App. D.1/D.3/D.4)
 D_TYPE = jnp.float32
 
+# Numerical guard for the decay-normalized keys K̄ = γ^{-1}⊙K = exp(-G)⊙K (Eq.19/32).
+# g_t ≤ 0, so the within-chunk cumsum G is negative and exp(-G) grows; once the
+# trained decay is strong enough that -G exceeds ~88 anywhere in a chunk, exp(-G)
+# OVERFLOWS fp32 -> inf -> NaN (the classic "trains fine, then NaN" failure). We
+# floor G so exp(-G) ≤ exp(30) ≈ 1e13, far below the fp32 ceiling. A position past
+# this floor has decay weight exp(-30) ≈ 1e-13 — already fully erased — so flooring
+# is the correct limit, not an approximation that changes well-conditioned results.
+# Applied ONCE to G, so γ=exp(G), γ^{-1}=exp(-G), γ_C/γ, and Q_γ stay mutually
+# consistent (every telescoping ratio still uses the same clamped G).
+_LOG_DECAY_FLOOR = -30.0
+
 
 # --------------------------------------------------------------------------- #
 #  Single (batch, head) sequence — the actual algorithm.
@@ -77,6 +88,10 @@ def _chunkwise_single(
         # --- Cumulative decay -------------------------------------------------
         # Eq. 18/30:  G_r = Σ_{i≤r} g_i (inclusive)
         G = jnp.cumsum(gc, axis=0)
+
+        # Numerical guard (see _LOG_DECAY_FLOOR): floor G so exp(-G) in K̄ below
+        # cannot overflow fp32. Order-preserving, applied before every use of G.
+        G = jnp.maximum(G, _LOG_DECAY_FLOOR)
 
         # Eq. 18/30:  γ_r = exp(G_r)
         gamma = jnp.exp(G)
