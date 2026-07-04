@@ -50,7 +50,7 @@ optim:
 
 train:
   batch_size: 4
-  total_steps: 2000
+  total_steps: 100
   seed: 0
   log_every: 20
   eval_every: 200

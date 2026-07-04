@@ -4,14 +4,14 @@
 # tokenizer's actual size is written back onto the model before it is built.
 
 model:
-  vocab_size: 8192          # target BPE vocab (overwritten by the trained tokenizer)
+  vocab_size: 8192 # target BPE vocab (overwritten by the trained tokenizer)
   d_model: 256
   n_layers: 6
-  full_attn_period: 4       # 3:1 linear:full (MLA on layers 3, 7, ...)
+  full_attn_period: 4 # 3:1 linear:full (MLA on layers 3, 7, ...)
   gdn_num_heads: 4
   gdn_head_k_dim: 64
   gdn_head_v_dim: 64
-  gdn_chunk_size: 64        # seq_len must be a multiple of this
+  gdn_chunk_size: 64 # seq_len must be a multiple of this
   gdn_conv_size: 4
   mla_num_q_heads: 8
   mla_num_kv_heads: 2
@@ -21,7 +21,7 @@ model:
   moe_n_routed: 8
   moe_n_shared: 1
   moe_top_k: 2
-  compute_dtype: float32    # use bfloat16 on GPU
+  compute_dtype: float32 # use bfloat16 on GPU
 
 data:
   task: pretrain
@@ -50,7 +50,7 @@ optim:
 
 train:
   batch_size: 8
-  total_steps: 3000
+  total_steps: 500
   seed: 0
   log_every: 20
   eval_every: 300
