@@ -105,6 +105,28 @@ core requirement) and `seq_len <= model.max_seq_len`.
 To scale up on a GPU: raise `d_model`, `n_layers`, `seq_len`, `moe_n_routed`, the
 head counts, and `total_steps`, and set `compute_dtype: bfloat16`.
 
+### Config presets
+
+| Config | Target hardware | Size | Precision | Notes |
+|--------|-----------------|------|-----------|-------|
+| [`configs/tiny_pretrain.yaml`](configs/tiny_pretrain.yaml) / [`tiny_sft.yaml`](configs/tiny_sft.yaml) | Laptop CPU | ~5M | float32 | quick end-to-end sanity |
+| Colab cells in [the notebook](Kimi_Linear_GDN2_Colab.ipynb) | Colab **T4** (16 GB) | ~140M | float32 | fits a free-tier GPU |
+| [`configs/h200_pretrain.yaml`](configs/h200_pretrain.yaml) / [`h200_sft.yaml`](configs/h200_sft.yaml) | Single **H200** (141 GB) | **4.2B** | bfloat16 | from-scratch training |
+
+The H200 preset is a ~4.2B-parameter model (d_model 2048, 24 layers, 16-expert MoE,
+4k context) in bfloat16 — master weights + AdamW moments stay fp32 (~50 GB), leaving
+~90 GB of HBM for activations. Train it from scratch, then chain into SFT:
+
+```bash
+python -m training.train --config configs/h200_pretrain.yaml
+python -m training.train --config configs/h200_sft.yaml --init-from runs/h200_pretrain
+```
+
+This pipeline is **single-device** (no `jax.sharding`/`pmap` and no gradient
+accumulation, so effective batch == `train.batch_size`). Tune `batch_size` /
+`seq_len` down if you hit `ResourceExhaustedError`; multi-GPU would require adding
+sharding to the train step.
+
 ### Scaling the data beyond memory
 The tiny configs materialize a bounded number of packed rows in memory (fast and
 fully reproducible). For a large corpus, replace the in-memory `grain.MapDataset.source`

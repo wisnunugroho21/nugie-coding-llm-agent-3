@@ -1,0 +1,82 @@
+# Train FROM SCRATCH on a single NVIDIA H200 (141 GB HBM3e, native bf16 tensor cores).
+#
+# This is a ~4B-parameter Kimi-Linear (GDN-2) model — roughly the paper's 1.3B-tier
+# widths, deepened, with a 16-expert MoE — trained in bfloat16. It targets ONE H200:
+# master weights + AdamW moments live in fp32 (~48 GB here), leaving ample HBM for
+# 4k-token activations. The numerically sensitive parts (GDN-2 core, RMSNorm, router
+# softmax, loss) stay fp32 regardless of compute_dtype.
+#
+# Memory / throughput knobs (this repo is single-device — no sharding or grad
+# accumulation, so effective batch == train.batch_size):
+#   * OOM?  lower train.batch_size (try 8, then 4) or data.seq_len (2048).
+#   * Room to spare?  raise train.batch_size, moe_n_routed, or n_layers.
+#   * Multi-GPU would require adding jax.sharding to the train step (not implemented).
+
+model:
+  vocab_size: 32768          # larger BPE vocab for code (overwritten by the tokenizer)
+  d_model: 2048
+  n_layers: 24
+  full_attn_period: 4        # 3:1 linear:full — MLA on layers 3, 7, 11, 15, 19, 23
+  gdn_num_heads: 16
+  gdn_head_k_dim: 128
+  gdn_head_v_dim: 128
+  gdn_chunk_size: 64         # seq_len must be a multiple of this
+  gdn_conv_size: 4
+  gdn_expanded_erase: false
+  mla_num_q_heads: 16
+  mla_num_kv_heads: 2
+  mla_head_dim: 128
+  max_seq_len: 4096
+  moe_d_ff: 1408
+  moe_n_routed: 16
+  moe_n_shared: 1
+  moe_top_k: 6
+  compute_dtype: bfloat16    # H200 has native bf16 tensor cores
+
+data:
+  task: pretrain
+  sources:
+    # All three OpenCoder annealing-corpus subsets expose a `text` column.
+    # NOTE: this pipeline materializes tokenized rows in memory; max_docs bounds
+    # both RAM and the (CPU) tokenization time up front. For true web-scale
+    # pretraining, swap the in-memory grain source for a streaming IterDataset over
+    # pre-tokenized shards (see README "Scaling the data beyond memory").
+    - repo: OpenCoder-LLM/opc-annealing-corpus
+      name: algorithmic_corpus
+      split: train
+      max_docs: 400000
+    - repo: OpenCoder-LLM/opc-annealing-corpus
+      name: synthetic_code_snippet
+      split: train
+      max_docs: 400000
+    - repo: OpenCoder-LLM/opc-annealing-corpus
+      name: synthetic_qa
+      split: train
+      max_docs: 200000
+  text_field: text
+  seq_len: 4096
+  val_fraction: 0.005
+  max_val_docs: 1024
+  streaming: true
+
+optim:
+  peak_lr: 3.0e-4
+  min_lr_ratio: 0.1
+  warmup_steps: 2000
+  weight_decay: 0.1
+  b1: 0.9
+  b2: 0.95
+  grad_clip: 1.0
+  router_bias_lr: 1.0e-3
+
+train:
+  batch_size: 12
+  total_steps: 100000
+  seed: 0
+  log_every: 50
+  eval_every: 2000
+  eval_batches: 50
+  save_every: 2000
+  keep_checkpoints: 3
+  out_dir: runs/h200_pretrain
+  tokenizer_path: runs/h200_pretrain/tokenizer.json
