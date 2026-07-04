@@ -5,7 +5,8 @@
 
 Pipeline:
     1. tokenizer   — load an existing one, else train a ByteLevel-BPE on the corpus.
-    2. data        — OpenCoder -> tokenized [2, seq_len] rows -> Grain iterators.
+    2. data        — OpenCoder -> tokenized [2, seq_len] rows in .npy shards on
+                     disk (written once, mmap-streamed) -> Grain iterators.
     3. model       — KimiLinear (GDN-2) sized to the tokenizer's vocab.
     4. optimizer   — Optax AdamW + warmup-cosine (see loop.build_optimizer).
     5. loop        — step-based training with periodic perplexity eval and Orbax
@@ -17,6 +18,7 @@ from __future__ import annotations
 import argparse
 import math
 import time
+from pathlib import Path
 
 import flax.nnx as nnx
 import jax.numpy as jnp
@@ -58,17 +60,19 @@ def ensure_tokenizer(cfg: ExperimentConfig) -> CodeTokenizer:
 
 
 def build_data(cfg: ExperimentConfig, tok: CodeTokenizer):
-    """Materialize bounded [2, seq_len] rows from OpenCoder and split train/val."""
-    log.info("building %s dataset from OpenCoder ...", cfg.data.task)
-    rows = datamod.build_rows(cfg.data, tok)
-    train_rows, val_rows = datamod.train_val_split(
-        rows, cfg.data.val_fraction, cfg.data.max_val_docs, cfg.data.shuffle_seed
-    )
+    """Tokenize OpenCoder into on-disk shards (once) and open them for streaming.
+
+    Returns (train_source, val_rows): a mmap-backed random-access source over the
+    train shards (fed to `make_train_iterator`) and the small in-memory val split.
+    """
+    shards_dir = cfg.data.shards_dir or str(Path(cfg.train.out_dir) / "shards")
+    log.info("preparing %s shards at %s ...", cfg.data.task, shards_dir)
+    train_source, val_rows = datamod.ensure_shards(cfg.data, tok, shards_dir)
     log.info(
-        "dataset: %s train rows, %s val rows (seq_len=%d)",
-        human(len(train_rows)), human(len(val_rows)), cfg.data.seq_len,
+        "dataset: %s train rows (streamed from disk), %s val rows (seq_len=%d)",
+        human(len(train_source)), human(len(val_rows)), cfg.data.seq_len,
     )
-    return train_rows, val_rows
+    return train_source, val_rows
 
 
 def evaluate(model, val_rows, batch_size, max_batches) -> float:
@@ -109,7 +113,7 @@ def main():
 
     # 1. tokenizer -> 2. data
     tok = ensure_tokenizer(cfg)
-    train_rows, val_rows = build_data(cfg, tok)
+    train_source, val_rows = build_data(cfg, tok)
 
     # 3. model
     cfg.validate()  # re-check now that vocab_size is finalized
@@ -124,7 +128,7 @@ def main():
 
     # 5. data iterator + checkpoints
     train_it = datamod.make_train_iterator(
-        train_rows, cfg.train.batch_size, cfg.data.shuffle_seed
+        train_source, cfg.train.batch_size, cfg.data.shuffle_seed
     )
     ckpt = CheckpointManager(cfg.train.out_dir, cfg.train.keep_checkpoints)
 

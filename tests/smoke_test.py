@@ -9,6 +9,7 @@ Run it to verify the plumbing before launching a real OpenCoder run:
 
 from __future__ import annotations
 
+import dataclasses
 import sys
 import tempfile
 from pathlib import Path
@@ -28,7 +29,7 @@ from gated_deltanet_2.core import (  # noqa: E402
 from kimi_linear_gdn2 import KimiLinear, KimiLinearConfig, count_params  # noqa: E402
 from training import data as datamod  # noqa: E402
 from training.checkpoint import CheckpointManager  # noqa: E402
-from training.config import OptimConfig  # noqa: E402
+from training.config import DataConfig, OptimConfig  # noqa: E402
 from training.loop import build_optimizer, eval_step, make_train_step  # noqa: E402
 from training.tokenizer import CodeTokenizer  # noqa: E402
 
@@ -73,6 +74,37 @@ def main():
     # prompt is masked -> some labels are IGNORE, some are supervised
     assert (sft_rows[:, 1] == datamod.IGNORE).any() and (sft_rows[:, 1] != datamod.IGNORE).any()
     print(f"[smoke] data OK (pretrain {len(pre_rows)} rows, sft {len(sft_rows)} rows)")
+
+    # 2b. sharded on-disk pipeline (the trainer's real path) --------------
+    dcfg = DataConfig(
+        task="pretrain",
+        sources=[{"repo": "synthetic", "name": None}],  # fingerprint only; rows injected
+        seq_len=seq_len, val_fraction=0.1, max_val_docs=32, rows_per_shard=50,
+    )
+    shard_dir = tmp / "shards"
+    datamod.write_shards(dcfg, tok, shard_dir, rows=iter(pre_rows))
+    src, shard_val = datamod.load_shards(dcfg, shard_dir, tok.vocab_size)
+    assert len(src) > 50, "expected more than one shard"  # rows_per_shard=50
+    assert len(src) + len(shard_val) == len(pre_rows)
+    # every row must round-trip bit-exactly through the mmap-backed source
+    disk_rows = np.stack([src[i] for i in range(len(src))])
+    kept = np.concatenate([shard_val, disk_rows])  # val rows were peeled off in order
+    assert sorted(map(bytes, kept)) == sorted(map(bytes, pre_rows))
+    # streaming iterator over shards: resume from a saved state reproduces batches
+    sit = datamod.make_train_iterator(src, batch_size=4, seed=0)
+    for _ in range(3):
+        next(sit)
+    sstate = sit.get_state()
+    expect = np.asarray(next(sit))
+    sit.set_state(sstate)
+    assert np.array_equal(np.asarray(next(sit)), expect), "shard iterator resume mismatch"
+    # a changed config must be rejected instead of reusing stale shards
+    try:
+        datamod.load_shards(dataclasses.replace(dcfg, seq_len=seq_len * 2), shard_dir, tok.vocab_size)
+        raise AssertionError("stale-shard fingerprint mismatch was not detected")
+    except ValueError:
+        pass
+    print(f"[smoke] shards OK ({len(src)} train rows on disk, {len(shard_val)} val rows)")
 
     # 3. model -----------------------------------------------------------
     cfg = KimiLinearConfig(

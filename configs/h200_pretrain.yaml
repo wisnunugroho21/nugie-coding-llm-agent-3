@@ -39,10 +39,11 @@ data:
   task: pretrain
   sources:
     # All three OpenCoder annealing-corpus subsets expose a `text` column.
-    # NOTE: this pipeline materializes tokenized rows in memory; max_docs bounds
-    # both RAM and the (CPU) tokenization time up front. For true web-scale
-    # pretraining, swap the in-memory grain source for a streaming IterDataset over
-    # pre-tokenized shards (see README "Scaling the data beyond memory").
+    # NOTE: the corpus is tokenized ONCE into .npy shards (under train.out_dir/shards,
+    # or data.shards_dir) and streamed from disk via mmap during training — RAM does
+    # not bound corpus size. max_docs bounds the one-time (CPU) tokenization cost and
+    # the disk footprint; shards are reused on relaunch if the config fingerprint
+    # matches (see README "Scaling the data beyond memory").
     - repo: OpenCoder-LLM/opc-annealing-corpus
       name: algorithmic_corpus
       split: train

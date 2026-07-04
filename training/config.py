@@ -66,6 +66,14 @@ class DataConfig:
     streaming: bool = True  # stream from the Hub instead of a full local download
     hf_cache_dir: str | None = None
 
+    # On-disk shard cache of packed [2, seq_len] rows (see data.write_shards).
+    # The corpus is tokenized ONCE into .npy shards there and training streams
+    # them via mmap — RAM no longer bounds corpus size. None -> defaults to
+    # <train.out_dir>/shards at runtime; reused across runs if the fingerprint
+    # (task/sources/seq_len/tokenizer) matches.
+    shards_dir: str | None = None
+    rows_per_shard: int = 4096  # rows per shard file (~128 MiB at seq_len 4096)
+
     def __post_init__(self):
         self.sources = [
             s if isinstance(s, SourceSpec) else SourceSpec(**s) for s in self.sources
