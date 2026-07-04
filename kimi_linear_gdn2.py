@@ -228,6 +228,18 @@ class DecoderLayer(nnx.Module):
         return x, new_cache
 
 
+# Gradient checkpointing (remat): during the backward pass each layer's internal
+# activations are recomputed from its input instead of being kept alive for the
+# whole forward. Without this, one train step must hold every layer's intermediates
+# at once (hundreds of GiB at 4k tokens x batch 12); with it, live activation
+# memory is one residual-stream tensor per layer boundary plus a single layer's
+# internals. Forward-only callers (eval/inference) pay nothing — remat only changes
+# what is saved for jax.grad.
+@nnx.remat
+def _rematted_layer(layer: DecoderLayer, x: jax.Array):
+    return layer(x)
+
+
 # --------------------------------------------------------------------------- #
 #  The full model.
 # --------------------------------------------------------------------------- #
@@ -276,7 +288,7 @@ class KimiLinear(nnx.Module):
 
         x = self.embed(input_ids)  # [B, L, d_model]
         for layer in self.layers:
-            x, aux = layer(x)
+            x, aux = _rematted_layer(layer, x)
 
             aux_loss = aux_loss + aux["aux_loss"]
             group_sizes.append(aux["group_sizes"])

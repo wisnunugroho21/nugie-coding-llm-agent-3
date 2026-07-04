@@ -7,7 +7,9 @@
 # softmax, loss) stay fp32 regardless of compute_dtype.
 #
 # Memory / throughput knobs (this repo is single-device — no sharding or grad
-# accumulation, so effective batch == train.batch_size):
+# accumulation, so effective batch == train.batch_size). Each DecoderLayer is
+# gradient-checkpointed (nnx.remat) and the MLA layers use cuDNN flash attention,
+# so activation memory stays modest at 4k tokens:
 #   * OOM?  lower train.batch_size (try 8, then 4) or data.seq_len (2048).
 #   * Room to spare?  raise train.batch_size, moe_n_routed, or n_layers.
 #   * Multi-GPU would require adding jax.sharding to the train step (not implemented).

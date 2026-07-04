@@ -13,9 +13,10 @@ softmax attention; this module is that layer, in Kimi Linear's exact flavor:
     way, the K/V up-projections fold into the neighboring matrices exactly, so the
     latent itself serves as both K and V and never gets up-projected at runtime.
 
-Two paths, same math: `__call__` for full-sequence training (causal-masked matrix
-attention) and `step` for streaming decode (append the new latent to a preallocated
-cache, attend over it).
+Two paths, same math: `__call__` for full-sequence training (fused causal SDPA —
+cuDNN flash attention on GPU, so the T×T score matrix is never materialized) and
+`step` for streaming decode (append the new latent to a preallocated cache, attend
+over it).
 """
 
 from typing import NamedTuple
@@ -131,65 +132,38 @@ class GroupedQueryLatentAttention(nnx.Module):
         batch_size, seq_length, _ = x.shape
 
         # --- Queries (already in the compressed K space via the absorbed W_UK) ---
-        q_latent = self.w_q_uk(x)  # (B, T, num_q_heads * head_dim)
-
-        # Split the flat projection into per-head latent vectors.
-        q_reshaped = q_latent.reshape(
+        q_heads = self.w_q_uk(x).reshape(
             batch_size, seq_length, self.num_q_heads, self.head_dim
         )  # (B, T, Hq, Dh)
 
-        # Move the head axis next to batch for batched matmuls: (B, Hq, T, Dh)
-        q_heads = q_reshaped.swapaxes(1, 2)
-
         # --- Shared KV latent (serves as both keys and values) ---
-        l_kv = self.w_dkv(x)  # (B, T, num_kv_heads * head_dim)
-
-        l_kv_reshaped = l_kv.reshape(
+        l_kv_heads = self.w_dkv(x).reshape(
             batch_size, seq_length, self.num_kv_heads, self.head_dim
         )  # (B, T, Hkv, Dh)
 
-        l_kv_heads = l_kv_reshaped.swapaxes(1, 2)  # (B, Hkv, T, Dh)
+        # Fused causal scaled-dot-product attention over the latent. The one latent
+        # tensor is passed as BOTH keys and values (the MLA absorption), and GQA
+        # head sharing (Hq a multiple of Hkv) is handled natively — no repeat/tile.
+        # Crucially this never materializes the (B, Hq, T, T) score matrix: with
+        # bf16/fp16 on GPU it dispatches to the cuDNN flash-attention kernel; the
+        # XLA fallback still runs the softmax in fp32 (matching the manual path we
+        # replaced). Default scale is 1/sqrt(head_dim), same as before.
+        implementation = (
+            "cudnn"
+            if q_heads.dtype in (jnp.bfloat16, jnp.float16)
+            and jax.default_backend() == "gpu"
+            else "xla"
+        )
+        weighted_heads = jax.nn.dot_product_attention(
+            q_heads,
+            l_kv_heads,
+            l_kv_heads,
+            is_causal=True,
+            implementation=implementation,
+        )  # (B, T, Hq, Dh)
 
-        # GQA tiling: repeat each latent head `group_size` times so it lines up
-        # with the query heads. `repeat` interleaves, so KV head i feeds query
-        # heads [i*group_size : (i+1)*group_size]. Result: (B, Hq, T, Dh).
-        # (This materializes the full Hq KV stack; broadcasting would save memory
-        # but materializing keeps the einsums simple.)
-        l_kv_repeated = l_kv_heads.repeat(self.group_size, axis=1)
-
-        # --- Attention scores: Q . K^T, contracting the latent feature dim `d` ---
-        # 'd' is shared (contracted); 'k' indexes key/latent positions (kept).
-        qk_t = jnp.einsum("bhqd, bhkd -> bhqk", q_heads, l_kv_repeated)  # (B, Hq, T, T)
-
-        # Scale by sqrt of the latent per-head dim. Upcast to fp32 so the masking,
-        # softmax max/exp/sum are stable even when the projections ran in bf16.
-        scaled_logits = qk_t.astype(F32) / jnp.sqrt(self.head_dim)
-
-        # Causal mask (True = keep): future positions -> -inf so they vanish under
-        # softmax. Built at trace time from the actual sequence length — under jit
-        # this is a compile-time constant (folded by XLA), so nothing is stored in
-        # the module state or in checkpoints. Safe to use -inf because the diagonal
-        # is always kept (no fully-masked rows -> the softmax cannot NaN).
-        causal_mask = jnp.tril(jnp.ones((seq_length, seq_length), dtype=bool))
-        scaled_logits = jnp.where(causal_mask[None, None], scaled_logits, -jnp.inf)
-
-        # Softmax over the key axis -> per-query attention distribution (fp32), then
-        # back to the compute dtype for the (bf16) weighted-sum matmul below.
-        a = jax.nn.softmax(scaled_logits, axis=-1).astype(
-            l_kv_repeated.dtype
-        )  # (B, Hq, T, T)
-
-        # --- Weighted sum of value-latents ---
-        # 'k' is shared between the weights and the value positions, so it is the
-        # contracted axis (the actual attention sum); 'd' is the kept feature dim.
-        # Because keys and values are the same latent, l_kv_repeated reappears here.
-        weighted_heads = jnp.einsum(
-            "bhqk, bhkd -> bhqd", a, l_kv_repeated
-        )  # (B, Hq, T, Dh)
-
-        # Move head axis back and flatten heads: (B, T, Hq, Dh) -> (B, T, Hq*Dh)
-        weighted_reshaped = weighted_heads.swapaxes(1, 2)
-        weighted_latents = weighted_reshaped.reshape(
+        # Flatten heads: (B, T, Hq, Dh) -> (B, T, Hq*Dh)
+        weighted_latents = weighted_heads.reshape(
             batch_size, seq_length, self.num_q_heads * self.head_dim
         )
 
