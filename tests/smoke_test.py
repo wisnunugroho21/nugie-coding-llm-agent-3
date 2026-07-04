@@ -19,6 +19,12 @@ import flax.nnx as nnx  # noqa: E402
 import jax.numpy as jnp  # noqa: E402
 import numpy as np  # noqa: E402
 
+import jax  # noqa: E402
+
+from gated_deltanet_2.core import (  # noqa: E402
+    chunkwise_gated_delta_rule_2,
+    recurrent_gated_delta_rule_2,
+)
 from kimi_linear_gdn2 import KimiLinear, KimiLinearConfig, count_params  # noqa: E402
 from training import data as datamod  # noqa: E402
 from training.checkpoint import CheckpointManager  # noqa: E402
@@ -133,6 +139,41 @@ def main():
     loss, _ = train_step(model, optimizer, jnp.asarray(inp), jnp.asarray(lab))
     assert np.isfinite(float(loss))
     print("[smoke] SFT step OK")
+
+    # 9. GDN-2 core numerical-stability regression -----------------------
+    # The chunkwise core forms K̄ = exp(-G)⊙K; with strong (trained) decay the
+    # cumulative -G can exceed the fp32 overflow point -> inf -> NaN. core.py floors
+    # the cumulative log-decay to prevent this. Guard against a regression by running
+    # the kernel under DELIBERATELY EXTREME decay and asserting the output is finite;
+    # also confirm that under MILD decay the floor is inert (chunkwise == recurrent).
+    B, H, L, dk, dv, C = 1, 2, 128, 16, 16, 64
+    ks = jax.random.split(jax.random.PRNGKey(7), 6)
+
+    def _unit(x):
+        return x / (jnp.linalg.norm(x, axis=-1, keepdims=True) + 1e-6)
+
+    def _inputs(decay_scale):
+        q = _unit(jax.random.normal(ks[0], (B, H, L, dk)))
+        k = _unit(jax.random.normal(ks[1], (B, H, L, dk)))
+        v = jax.random.normal(ks[2], (B, H, L, dv))
+        g = -decay_scale * jax.nn.softplus(jax.random.normal(ks[3], (B, H, L, dk)))
+        b = jax.nn.sigmoid(jax.random.normal(ks[4], (B, H, L, dk)))
+        w = jax.nn.sigmoid(jax.random.normal(ks[5], (B, H, L, dv)))
+        return q, k, v, g, b, w, jnp.zeros((B, H, dk, dv))
+
+    # extreme decay (avg g ~ -3/token -> chunk cumsum well past the fp32 exp limit)
+    q, k, v, g, b, w, s0 = _inputs(4.0)
+    o_ext, s_ext = chunkwise_gated_delta_rule_2(q, k, v, g, b, w, s0, chunk_size=C)
+    assert bool(jnp.isfinite(o_ext).all()), "GDN-2 core produced non-finite output under extreme decay"
+    assert bool(jnp.isfinite(s_ext).all()), "GDN-2 core produced non-finite state under extreme decay"
+
+    # mild decay: floor inert -> chunkwise must still match the recurrent reference
+    q, k, v, g, b, w, s0 = _inputs(0.05)
+    o_c, _ = chunkwise_gated_delta_rule_2(q, k, v, g, b, w, s0, chunk_size=C)
+    o_r, _ = recurrent_gated_delta_rule_2(q, k, v, g, b, w, s0)
+    max_diff = float(jnp.max(jnp.abs(o_c - o_r)))
+    assert max_diff < 1e-4, f"chunkwise vs recurrent mismatch under mild decay: {max_diff}"
+    print(f"[smoke] GDN-2 core stability OK (extreme decay finite; mild diff {max_diff:.1e})")
 
     print("\n[smoke] ALL CHECKS PASSED ✓")
 
