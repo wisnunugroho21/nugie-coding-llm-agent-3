@@ -1,0 +1,16 @@
+# Core model + training stack (versions verified against this pipeline).
+jax>=0.10
+flax>=0.12
+optax>=0.2.4
+orbax-checkpoint>=0.11
+grain>=0.2.10
+
+# Data + tokenizer.
+datasets>=4.0
+huggingface-hub>=0.26
+tokenizers>=0.20
+numpy>=2.0
+pyyaml>=6.0
+
+# For JAX on GPU install the matching CUDA wheel instead of plain `jax`, e.g.:
+#   pip install -U "jax[cuda12]"

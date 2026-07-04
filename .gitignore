@@ -216,3 +216,7 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# Training artifacts
+runs/
+*.orbax-checkpoint-tmp-*

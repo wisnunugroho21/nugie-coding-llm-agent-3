@@ -1,0 +1,61 @@
+# Tiny PRETRAIN run — next-token LM on OpenCoder's annealing corpus.
+# Sized to train on a laptop CPU. Scale d_model / n_layers / seq_len / experts up
+# on a GPU. `model.vocab_size` here is the TARGET tokenizer vocab; the trained
+# tokenizer's actual size is written back onto the model before it is built.
+
+model:
+  vocab_size: 8192          # target BPE vocab (overwritten by the trained tokenizer)
+  d_model: 256
+  n_layers: 6
+  full_attn_period: 4       # 3:1 linear:full (MLA on layers 3, 7, ...)
+  gdn_num_heads: 4
+  gdn_head_k_dim: 64
+  gdn_head_v_dim: 64
+  gdn_chunk_size: 64        # seq_len must be a multiple of this
+  gdn_conv_size: 4
+  mla_num_q_heads: 8
+  mla_num_kv_heads: 2
+  mla_head_dim: 64
+  max_seq_len: 512
+  moe_d_ff: 512
+  moe_n_routed: 8
+  moe_n_shared: 1
+  moe_top_k: 2
+  compute_dtype: float32    # use bfloat16 on GPU
+
+data:
+  task: pretrain
+  sources:
+    - repo: OpenCoder-LLM/opc-annealing-corpus
+      name: algorithmic_corpus
+      split: train
+      max_docs: 20000
+    - repo: OpenCoder-LLM/opc-annealing-corpus
+      name: synthetic_code_snippet
+      split: train
+      max_docs: 20000
+  text_field: text
+  seq_len: 256
+  val_fraction: 0.01
+  max_val_docs: 256
+  streaming: true
+
+optim:
+  peak_lr: 3.0e-4
+  min_lr_ratio: 0.1
+  warmup_steps: 200
+  weight_decay: 0.1
+  grad_clip: 1.0
+  router_bias_lr: 1.0e-3
+
+train:
+  batch_size: 8
+  total_steps: 3000
+  seed: 0
+  log_every: 20
+  eval_every: 300
+  eval_batches: 20
+  save_every: 500
+  keep_checkpoints: 3
+  out_dir: runs/tiny_pretrain
+  tokenizer_path: runs/tiny_pretrain/tokenizer.json

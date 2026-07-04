@@ -1,0 +1,61 @@
+# Tiny SFT run — instruction tuning on OpenCoder's SFT pairs (prompt-masked loss).
+# Point tokenizer_path at a pretrained run's tokenizer to reuse its vocab; otherwise
+# a new tokenizer is trained on the instruction/output text.
+
+model:
+  vocab_size: 8192
+  d_model: 256
+  n_layers: 6
+  full_attn_period: 4
+  gdn_num_heads: 4
+  gdn_head_k_dim: 64
+  gdn_head_v_dim: 64
+  gdn_chunk_size: 64
+  gdn_conv_size: 4
+  mla_num_q_heads: 8
+  mla_num_kv_heads: 2
+  mla_head_dim: 64
+  max_seq_len: 512
+  moe_d_ff: 512
+  moe_n_routed: 8
+  moe_n_shared: 1
+  moe_top_k: 2
+  compute_dtype: float32
+
+data:
+  task: sft
+  sources:
+    - repo: OpenCoder-LLM/opc-sft-stage1
+      name: realuser_instruct
+      split: train
+      max_docs: 20000
+    - repo: OpenCoder-LLM/opc-sft-stage2
+      name: evol_instruct
+      split: train
+      max_docs: 20000
+  instruction_field: instruction
+  response_field: output
+  seq_len: 512
+  val_fraction: 0.02
+  max_val_docs: 256
+  streaming: true
+
+optim:
+  peak_lr: 1.0e-4
+  min_lr_ratio: 0.1
+  warmup_steps: 100
+  weight_decay: 0.1
+  grad_clip: 1.0
+  router_bias_lr: 1.0e-3
+
+train:
+  batch_size: 4
+  total_steps: 2000
+  seed: 0
+  log_every: 20
+  eval_every: 200
+  eval_batches: 20
+  save_every: 500
+  keep_checkpoints: 3
+  out_dir: runs/tiny_sft
+  tokenizer_path: runs/tiny_sft/tokenizer.json
