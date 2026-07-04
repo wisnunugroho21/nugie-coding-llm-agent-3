@@ -67,5 +67,28 @@ class CheckpointManager:
         nnx.update(optimizer, restored["optimizer"])
         return restored["data"], restored["meta"]
 
+    def restore_model(self, model, step: int | None = None) -> int:
+        """Restore ONLY the model weights (not optimizer/data), in place.
+
+        Used to warm-start a new run from another run's checkpoint — e.g. loading
+        pretrained weights into an SFT run (`--init-from`). The optimizer, data
+        iterator, and step counter are left fresh. Returns the restored step.
+
+        The two models must share the same architecture and vocab size, or Orbax
+        raises a structure/shape mismatch (surfaced with a clear message by the
+        caller).
+        """
+        step = self._mgr.latest_step() if step is None else step
+        if step is None:
+            raise FileNotFoundError(f"no checkpoint found under {self.dir}")
+        restored = self._mgr.restore(
+            step,
+            args=ocp.args.Composite(
+                model=ocp.args.StandardRestore(nnx.state(model)),
+            ),
+        )
+        nnx.update(model, restored["model"])
+        return step
+
     def close(self) -> None:
         self._mgr.close()

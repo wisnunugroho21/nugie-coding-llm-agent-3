@@ -54,8 +54,11 @@ python -m training.train --config configs/tiny_pretrain.yaml
 # 2. Resume if interrupted (restores weights, optimizer, and exact data position)
 python -m training.train --config configs/tiny_pretrain.yaml --resume
 
-# 3. Instruction-tune on the OpenCoder SFT pairs
-python -m training.train --config configs/tiny_sft.yaml
+# 3. Instruction-tune on the OpenCoder SFT pairs, warm-started from the
+#    pretrained checkpoint (weights only; fresh optimizer + data).
+#    Reuse the pretraining tokenizer so the vocab matches (set train.tokenizer_path
+#    in the SFT config to the pretrain run's tokenizer.json).
+python -m training.train --config configs/tiny_sft.yaml --init-from runs/tiny_pretrain
 
 # 4. Evaluate: perplexity + sample generations
 python -m training.evaluate --config configs/tiny_pretrain.yaml
@@ -81,7 +84,11 @@ python -m training.evaluate --config configs/tiny_sft.yaml --humaneval --humanev
    aux-loss-free balancing) inside the jitted step.
 4. **Checkpointing** ([`training/checkpoint.py`](training/checkpoint.py)) — Orbax
    `CheckpointManager` saves model + optimizer + data-iterator + metadata per step,
-   keeping the last `keep_checkpoints`.
+   keeping the last `keep_checkpoints`. `--resume` continues the same run (full
+   state); `--init-from <run_dir>` warm-starts a **new** run from another run's
+   weights only (fresh optimizer/data, step 0) — this is how pretrain → SFT chains.
+   The two runs must share the architecture and vocab (reuse the same
+   `tokenizer_path`), or the restore raises a clear mismatch error.
 5. **Evaluation** ([`training/evaluate.py`](training/evaluate.py)) — token-weighted
    perplexity on a held-out OpenCoder split, greedy generations from a few prompts,
    and optional functional **HumanEval pass@1** (each completion is executed against

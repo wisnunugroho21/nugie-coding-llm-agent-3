@@ -92,6 +92,13 @@ def main():
     ap.add_argument("--config", required=True)
     ap.add_argument("--resume", action="store_true",
                     help="restore the latest checkpoint under train.out_dir and continue")
+    ap.add_argument("--init-from", default=None, metavar="RUN_DIR",
+                    help="warm-start model WEIGHTS from another run's checkpoint dir "
+                         "(e.g. a pretrained run) before an SFT run. Fresh optimizer, "
+                         "data, and step counter. Ignored if --resume restores a "
+                         "checkpoint from this run's own out_dir.")
+    ap.add_argument("--init-from-step", type=int, default=None,
+                    help="specific step to load with --init-from (default: latest).")
     args = ap.parse_args()
 
     set_xla_flags_for_cpu()
@@ -123,10 +130,26 @@ def main():
 
     start_step = 0
     if args.resume and ckpt.latest_step() is not None:
+        # Continue THIS run: full state (weights + optimizer + data position + step).
         data_state, meta = ckpt.restore(model, optimizer)
         train_it.set_state(data_state)
         start_step = int(meta["step"]) + 1
         log.info("resumed from step %d", start_step - 1)
+    elif args.init_from:
+        # Warm-start a NEW run (e.g. SFT) from another run's WEIGHTS only. The
+        # optimizer and data iterator stay fresh and training begins at step 0.
+        src = CheckpointManager(args.init_from, cfg.train.keep_checkpoints)
+        try:
+            loaded = src.restore_model(model, args.init_from_step)
+        except Exception as e:  # shape/structure mismatch -> actionable message
+            raise SystemExit(
+                f"--init-from failed to load weights from {args.init_from!r}: {e}\n"
+                "The init-from checkpoint and this config must share the same model "
+                "architecture and vocab (reuse the same tokenizer_path)."
+            )
+        src.close()
+        log.info("initialized weights from %s (step %d); optimizer & data are fresh",
+                 args.init_from, loaded)
 
     # 6. training loop
     log.info("training %d -> %d steps", start_step, cfg.train.total_steps)
