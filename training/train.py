@@ -158,18 +158,20 @@ def main():
     # 6. training loop
     log.info("training %d -> %d steps", start_step, cfg.train.total_steps)
     t0 = time.time()
-    running = 0.0
+    # Per-step CE values stay ON DEVICE; converting to float every step would
+    # block Python on the GPU and serialize dispatch with compute. We only sync
+    # at the logging boundary, so the host runs ahead and keeps the GPU fed.
+    running: list[jnp.ndarray] = []
     for step in range(start_step, cfg.train.total_steps):
-        batch = np.asarray(next(train_it))
+        # One host->device copy per step ([B, 2, seq_len]); split on device.
+        batch = jnp.asarray(np.asarray(next(train_it)))
         inp, lab = datamod.split_batch(batch)
-        loss, ce = train_step(
-            model, optimizer, jnp.asarray(inp), jnp.asarray(lab)
-        )
-        running += float(ce)
+        loss, ce = train_step(model, optimizer, inp, lab)
+        running.append(ce)
 
         if (step + 1) % cfg.train.log_every == 0:
-            avg = running / cfg.train.log_every
-            running = 0.0
+            avg = float(jnp.stack(running).mean())  # single device sync
+            running.clear()
             dt = time.time() - t0
             toks = cfg.train.log_every * cfg.train.batch_size * cfg.data.seq_len
             log.info(

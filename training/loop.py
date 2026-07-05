@@ -9,6 +9,8 @@ router *selection bias* toward uniform load — DeepSeek-V3's aux-loss-free bala
 
 from __future__ import annotations
 
+from functools import partial
+
 import flax.nnx as nnx
 import jax
 import jax.numpy as jnp
@@ -87,9 +89,18 @@ def _loss_fn(model, input_ids, labels):
 #  Steps
 # --------------------------------------------------------------------------- #
 def make_train_step(router_bias_lr: float):
-    """Build the jitted training step. `router_bias_lr` is captured as a constant."""
+    """Build the jitted training step. `router_bias_lr` is captured as a constant.
 
-    @nnx.jit
+    The model and optimizer states are DONATED to the step: XLA writes the updated
+    fp32 weights and AdamW moments back into the same device buffers instead of
+    allocating fresh ones. Without donation the step transiently holds both the old
+    and the new copies (~2x the ~48 GB training state at the 4B/H200 scale) —
+    donation removes that peak and the copy bandwidth. nnx.jit propagates the new
+    state into the same `model`/`optimizer` Python objects, so callers (eval,
+    checkpointing, generation) are unaffected.
+    """
+
+    @partial(nnx.jit, donate_argnums=(0, 1))
     def train_step(model, optimizer, input_ids, labels):
         (loss, (ce, aux)), grads = nnx.value_and_grad(_loss_fn, has_aux=True)(
             model, input_ids, labels

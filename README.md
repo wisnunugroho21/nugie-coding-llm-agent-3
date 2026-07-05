@@ -128,11 +128,19 @@ accumulation, so effective batch == `train.batch_size`). Tune `batch_size` /
 sharding to the train step.
 
 ### Scaling the data beyond memory
-The tiny configs materialize a bounded number of packed rows in memory (fast and
-fully reproducible). For a large corpus, replace the in-memory `grain.MapDataset.source`
-in [`training/data.py`](training/data.py) with a streaming `grain` IterDataset over
-sharded tokenized files — the rest of the pipeline (loss, optimizer, checkpointing)
-is unchanged.
+The trainer never holds the corpus in RAM. On first launch it streams the
+configured HuggingFace sources, tokenizes and packs them into `[2, seq_len]` rows,
+and writes fixed-size `.npy` shards (plus a `manifest.json` with a config
+fingerprint) under `train.out_dir/shards` — or `data.shards_dir` if set. Training
+then streams those shards through a Grain `IterDataset` backed by a memory-mapped
+random-access source ([`training/data.py`](training/data.py):
+`write_shards` / `ShardedRowSource` / `ensure_shards`), keeping global shuffling
+and exact checkpoint resume (the Grain iterator state is saved with each Orbax
+checkpoint). Relaunches reuse the shards if the data config and tokenizer
+fingerprint match; a mismatch fails loudly instead of training on stale data.
+Corpus size is bounded by disk (`~seq_len × 8` bytes per row), not RAM; `max_docs`
+caps the one-time tokenization cost per source. The small val split is written at
+shard time (`val.npy`) and kept in memory for perplexity eval.
 
 > **Note on HumanEval:** `--humaneval` runs model-generated code on your machine.
 > Each program runs in a separate process with a wall-clock timeout, but you should
