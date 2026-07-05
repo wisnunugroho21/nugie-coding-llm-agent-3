@@ -1,0 +1,80 @@
+# PRETRAIN on Kaggle "GPU T4 x2" (two 16 GB Turing T4s), data-parallel.
+#
+# ~140M-param Kimi-Linear (GDN-2) model that fits on ONE T4; the trainer replicates
+# it on both T4s and splits each batch across them (see training/parallel.py). To use
+# both GPUs, just launch normally on a 2-device Kaggle session — the trainer detects
+# the devices and goes data-parallel automatically.
+#
+#   * PRECISION: float32. T4 (Turing) has NO hardware bf16 — `compute_dtype: bfloat16`
+#     would run emulated and slow. Keep float32 here.
+#   * BATCH: batch_size 16 = 8 rows per GPU. MUST stay a multiple of the device count
+#     (2), or the trainer exits with a clear message. OOM? drop to 8 (4/GPU) or lower
+#     data.seq_len to 512.
+#   * Single T4 (x1 session) also works: it just runs replicate/split as no-ops.
+
+model:
+  vocab_size: 32768 # target BPE vocab (overwritten by the trained tokenizer)
+  d_model: 512
+  n_layers: 8
+  full_attn_period: 4 # 3:1 linear:full (MLA on layers 3, 7)
+  gdn_num_heads: 8
+  gdn_head_k_dim: 64
+  gdn_head_v_dim: 64
+  gdn_chunk_size: 64 # seq_len must be a multiple of this
+  gdn_conv_size: 4
+  mla_num_q_heads: 8
+  mla_num_kv_heads: 2
+  mla_head_dim: 64
+  max_seq_len: 1024
+  moe_d_ff: 1024
+  moe_n_routed: 8
+  moe_n_shared: 1
+  moe_top_k: 2
+  compute_dtype: float32 # T4-safe (no hardware bf16)
+
+data:
+  task: pretrain
+  sources:
+    # Corpus is tokenized ONCE into .npy shards (under out_dir/shards) and streamed
+    # from disk via mmap — needs Internet ON in the Kaggle session for the first run.
+    - repo: OpenCoder-LLM/opc-annealing-corpus
+      name: algorithmic_corpus
+      split: train
+      max_docs: 100000
+    - repo: OpenCoder-LLM/opc-annealing-corpus
+      name: synthetic_code_snippet
+      split: train
+      max_docs: 100000
+    - repo: OpenCoder-LLM/opc-annealing-corpus
+      name: synthetic_qa
+      split: train
+      max_docs: 50000
+  text_field: text
+  seq_len: 1024
+  val_fraction: 0.01
+  max_val_docs: 512
+  streaming: true
+
+optim:
+  peak_lr: 3.0e-4
+  min_lr_ratio: 0.1
+  warmup_steps: 500
+  weight_decay: 0.1
+  b1: 0.9
+  b2: 0.95
+  grad_clip: 1.0
+  router_bias_lr: 1.0e-3
+
+train:
+  batch_size: 16 # 8 rows/GPU on 2x T4; keep a multiple of the device count
+  total_steps: 5000
+  seed: 0
+  log_every: 20
+  eval_every: 500
+  eval_batches: 20
+  save_every: 500
+  keep_checkpoints: 3
+  # On Kaggle, point these under /kaggle/working so they persist across the session,
+  # e.g. out_dir: /kaggle/working/runs/t4_pretrain
+  out_dir: runs/t4_pretrain
+  tokenizer_path: runs/t4_pretrain/tokenizer.json

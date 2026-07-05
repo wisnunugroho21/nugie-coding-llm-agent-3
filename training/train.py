@@ -30,6 +30,7 @@ from . import data as datamod
 from .checkpoint import CheckpointManager
 from .config import ExperimentConfig, load_config
 from .loop import build_optimizer, eval_step, make_train_step
+from .parallel import build_mesh, n_devices, replicate, shard_batch
 from .tokenizer import CodeTokenizer, sample_corpus
 from .utils import device_summary, get_logger, human, set_xla_flags_for_cpu
 
@@ -75,14 +76,15 @@ def build_data(cfg: ExperimentConfig, tok: CodeTokenizer):
     return train_source, val_rows
 
 
-def evaluate(model, val_rows, batch_size, max_batches) -> float:
+def evaluate(model, val_rows, batch_size, max_batches, mesh) -> float:
     """Token-weighted perplexity over the validation rows."""
     if len(val_rows) < batch_size:
         return float("nan")
     tot_loss, tot_tok = 0.0, 0
     for batch in datamod.iterate_eval_batches(val_rows, batch_size, max_batches):
         inp, lab = datamod.split_batch(batch)
-        ls, nt = eval_step(model, jnp.asarray(inp), jnp.asarray(lab))
+        # Split each eval batch across devices too (data-parallel forward).
+        ls, nt = eval_step(model, shard_batch(mesh, inp), shard_batch(mesh, lab))
         tot_loss += float(ls)
         tot_tok += int(nt)
     if tot_tok == 0:
@@ -108,6 +110,19 @@ def main():
     set_xla_flags_for_cpu()
     cfg = load_config(args.config)
     log.info("devices: %s", device_summary())
+
+    # Data-parallel mesh over every visible device (1 device -> no-op).
+    mesh = build_mesh()
+    nd = n_devices(mesh)
+    if cfg.train.batch_size % nd != 0:
+        raise SystemExit(
+            f"train.batch_size ({cfg.train.batch_size}) must be divisible by the "
+            f"number of devices ({nd}) for data-parallel training — the batch is "
+            f"split evenly across devices. Set batch_size to a multiple of {nd}."
+        )
+    if nd > 1:
+        log.info("data-parallel over %d devices (%d rows/device per step)",
+                 nd, cfg.train.batch_size // nd)
 
     np.random.seed(cfg.train.seed)
 
@@ -155,6 +170,11 @@ def main():
         log.info("initialized weights from %s (step %d); optimizer & data are fresh",
                  args.init_from, loaded)
 
+    # Replicate the (possibly just-restored) model + optimizer onto every device.
+    # After this, the whole training state is committed to a replicated sharding, so
+    # the jitted step below runs data-parallel with automatic gradient all-reduce.
+    replicate(mesh, model, optimizer)
+
     # 6. training loop
     log.info("training %d -> %d steps", start_step, cfg.train.total_steps)
     t0 = time.time()
@@ -163,8 +183,9 @@ def main():
     # at the logging boundary, so the host runs ahead and keeps the GPU fed.
     running: list[jnp.ndarray] = []
     for step in range(start_step, cfg.train.total_steps):
-        # One host->device copy per step ([B, 2, seq_len]); split on device.
-        batch = jnp.asarray(np.asarray(next(train_it)))
+        # One host->device copy per step ([B, 2, seq_len]), split across devices
+        # along the batch axis; split into (input, labels) on device.
+        batch = shard_batch(mesh, next(train_it))
         inp, lab = datamod.split_batch(batch)
         loss, ce = train_step(model, optimizer, inp, lab)
         running.append(ce)
@@ -182,7 +203,7 @@ def main():
             t0 = time.time()
 
         if (step + 1) % cfg.train.eval_every == 0:
-            ppl = evaluate(model, val_rows, cfg.train.batch_size, cfg.train.eval_batches)
+            ppl = evaluate(model, val_rows, cfg.train.batch_size, cfg.train.eval_batches, mesh)
             log.info("step %6d | VAL ppl %.3f", step + 1, ppl)
             t0 = time.time()
 
@@ -195,7 +216,7 @@ def main():
     final = cfg.train.total_steps - 1
     ckpt.save(final, model, optimizer,
               data_state=train_it.get_state(), meta={"step": final})
-    ppl = evaluate(model, val_rows, cfg.train.batch_size, cfg.train.eval_batches)
+    ppl = evaluate(model, val_rows, cfg.train.batch_size, cfg.train.eval_batches, mesh)
     log.info("done. final VAL ppl %.3f | checkpoint at step %d", ppl, cfg.train.total_steps)
     ckpt.close()
 
