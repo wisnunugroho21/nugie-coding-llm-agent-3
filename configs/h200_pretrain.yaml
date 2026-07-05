@@ -15,14 +15,14 @@
 #   * Multi-GPU would require adding jax.sharding to the train step (not implemented).
 
 model:
-  vocab_size: 32768          # larger BPE vocab for code (overwritten by the tokenizer)
+  vocab_size: 32768 # larger BPE vocab for code (overwritten by the tokenizer)
   d_model: 2048
   n_layers: 24
-  full_attn_period: 4        # 3:1 linear:full — MLA on layers 3, 7, 11, 15, 19, 23
+  full_attn_period: 4 # 3:1 linear:full — MLA on layers 3, 7, 11, 15, 19, 23
   gdn_num_heads: 16
   gdn_head_k_dim: 128
   gdn_head_v_dim: 128
-  gdn_chunk_size: 64         # seq_len must be a multiple of this
+  gdn_chunk_size: 64 # seq_len must be a multiple of this
   gdn_conv_size: 4
   gdn_expanded_erase: false
   mla_num_q_heads: 16
@@ -33,7 +33,7 @@ model:
   moe_n_routed: 16
   moe_n_shared: 1
   moe_top_k: 6
-  compute_dtype: bfloat16    # H200 has native bf16 tensor cores
+  compute_dtype: bfloat16 # H200 has native bf16 tensor cores
 
 data:
   task: pretrain
@@ -73,7 +73,7 @@ optim:
   router_bias_lr: 1.0e-3
 
 train:
-  batch_size: 12
+  batch_size: 16
   total_steps: 100
   seed: 0
   log_every: 50
